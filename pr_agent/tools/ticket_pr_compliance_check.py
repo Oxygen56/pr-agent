@@ -45,11 +45,13 @@ _ASANA_TASK_URL_PATTERN = re.compile(
     r"|1/\d+/(?:project/\d+/|home/)?task/(?P<current_task_gid>\d+)(?:/comment/\d+)?"
     r")/?(?=$|[^\w/])"
 )
+# Security boundary: keep the token-bearing request target fixed to Asana rather than making it configurable.
 ASANA_TASK_API_URL = "https://app.asana.com/api/1.0/tasks/{task_gid}"
 ASANA_TASK_OPT_FIELDS = "gid,name,notes,permalink_url,tags.name"
 DEFAULT_ASANA_REQUEST_TIMEOUT = 10
 MAX_ASANA_REQUEST_TIMEOUT = 60
-MAX_RELATED_TICKETS = 3
+MAX_ASANA_TICKETS = 3
+MAX_GITHUB_TICKETS = 3
 
 
 def find_asana_tickets(text: str | None) -> list:
@@ -147,15 +149,17 @@ async def _fetch_asana_ticket_contents(
         for ticket_url in ticket_urls[:max_tickets]:
             if len(tickets_content) >= max_tickets:
                 break
-            task_gid = _get_asana_task_gid(ticket_url)
+            task_gid = None
             try:
+                task_gid = _get_asana_task_gid(ticket_url)
                 ticket_content = await _fetch_asana_ticket_content(
                     session,
                     ticket_url,
                     max_body_characters,
                 )
             except Exception as e:
-                get_logger().warning(f"Failed to fetch Asana task {task_gid}: {e}")
+                task_label = task_gid or "invalid reference"
+                get_logger().warning(f"Failed to fetch Asana task {task_label}: {e}")
                 continue
             tickets_content.append(ticket_content)
     return tickets_content
@@ -202,10 +206,9 @@ def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url
                 if issue_number.isdigit() and len(issue_number) < 5 and repo_path:
                     _add(f"{base_url_html.strip('/')}/{repo_path}/issues/{issue_number}")
 
-        if len(github_tickets) > 3:
+        if len(github_tickets) > MAX_GITHUB_TICKETS:
             get_logger().info(f"Too many tickets found in PR description: {len(github_tickets)}")
-            # Limit the number of tickets to 3
-            github_tickets = github_tickets[:3]
+            github_tickets = github_tickets[:MAX_GITHUB_TICKETS]
     except Exception as e:
         get_logger().error(f"Error extracting tickets error= {e}",
                            artifact={"traceback": traceback.format_exc()})
@@ -327,7 +330,7 @@ async def extract_tickets(git_provider):
         try:
             asana_tickets_content = await _fetch_asana_ticket_contents(
                 asana_ticket_urls,
-                MAX_RELATED_TICKETS,
+                MAX_ASANA_TICKETS,
                 MAX_TICKET_CHARACTERS,
             )
         except Exception as e:
@@ -349,24 +352,17 @@ async def extract_tickets(git_provider):
                     seen.add(link)
                     merged.append(link)
 
-            reserved_asana_slots = 1 if asana_tickets_content else 0
-            github_slots = MAX_RELATED_TICKETS - reserved_asana_slots
-            total_tickets = len(merged) + len(asana_tickets_content)
-            if total_tickets > MAX_RELATED_TICKETS:
-                get_logger().info(
-                    f"Too many tickets (description + branch + Asana): {total_tickets}"
-                )
-            # Keep the existing three-candidate GitHub attempt budget. Stop after
-            # enough successful issues are collected, leaving room for Asana.
-            tickets = merged[:MAX_RELATED_TICKETS]
+            if len(merged) > MAX_GITHUB_TICKETS:
+                get_logger().info(f"Too many GitHub tickets (description + branch): {len(merged)}")
+            # Preserve GitHub's established three-candidate budget. Asana tasks use
+            # their own bounded budget and therefore do not displace GitHub issues.
+            tickets = merged[:MAX_GITHUB_TICKETS]
             tickets_content = []
             repo_obj_cache = {}
 
             if tickets:
 
                 for ticket in tickets:
-                    if len(tickets_content) >= github_slots:
-                        break
                     repo_name, original_issue_number = git_provider._parse_issue_url(ticket)
 
                     try:
@@ -435,8 +431,7 @@ async def extract_tickets(git_provider):
                         'sub_issues': sub_issues_content  # Store sub-issues content
                     })
 
-            remaining_slots = MAX_RELATED_TICKETS - len(tickets_content)
-            tickets_content.extend(asana_tickets_content[:remaining_slots])
+            tickets_content.extend(asana_tickets_content)
             return tickets_content
 
         elif isinstance(git_provider, AzureDevopsProvider):
@@ -463,8 +458,8 @@ async def extract_tickets(git_provider):
                         f"Error processing Azure DevOps ticket: {e}",
                         artifact={"traceback": traceback.format_exc()},
                     )
-            # Preserve the existing Azure work-item result set; Asana references add context
-            # without imposing a new global cap on another provider's established behaviour.
+            # Preserve the existing Azure work-item result set. The independently bounded
+            # Asana results add context without imposing a new cap on Azure's established behaviour.
             tickets_content.extend(asana_tickets_content)
             return tickets_content
 

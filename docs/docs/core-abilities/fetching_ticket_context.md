@@ -133,6 +133,18 @@ The token is sent only to Asana's fixed task API endpoint as a Bearer token. Whe
 not accessible to that token, PR-Agent skips that Asana task instead of evaluating compliance against placeholder
 content. API request timeout can be adjusted with `asana.request_timeout` (10 seconds by default, capped at 60 seconds).
 
+### Ticket limits
+
+PR-Agent fetches the first three detected Asana tasks at most, preserving their description order. This is an
+additive, provider-specific limit, with native tickets listed before Asana tasks:
+
+- On GitHub, the existing limit of three GitHub issues is preserved, plus up to three Asana tasks.
+- On Azure DevOps, all linked work items are preserved, plus up to three Asana tasks.
+- On other providers, up to three detected Asana tasks can supply ticket context.
+
+Keeping these limits separate prevents Asana references from silently displacing native tickets and avoids changing
+the established ticket-extraction behavior of existing providers.
+
 ## Jira Integration
 
 We support both Jira Cloud and Jira Server/Data Center.

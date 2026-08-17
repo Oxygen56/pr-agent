@@ -242,8 +242,8 @@ class TestFindAsanaTickets:
             }
         ]
 
-    async def test_extract_tickets_reserves_slot_for_asana_when_truncated(self):
-        """Asana references should not be dropped when the ticket list is capped."""
+    async def test_extract_tickets_adds_asana_without_displacing_github(self):
+        """Asana context should not displace GitHub's three existing ticket slots."""
         provider = _GithubProvider(
             "Fixes #1 and #2 and #3. "
             "Related Asana task: https://app.asana.com/0/99/888888888888"
@@ -251,12 +251,12 @@ class TestFindAsanaTickets:
 
         tickets = await tpc.extract_tickets(provider)
 
-        assert len(tickets) == 3
-        asana_tickets = [
-            ticket for ticket in tickets
-            if ticket["ticket_url"].startswith("https://app.asana.com/")
+        assert [ticket["ticket_url"] for ticket in tickets] == [
+            "https://github.com/owner/repo/issues/1",
+            "https://github.com/owner/repo/issues/2",
+            "https://github.com/owner/repo/issues/3",
+            "https://app.asana.com/0/99/888888888888",
         ]
-        assert len(asana_tickets) == 1
 
     async def test_extract_tickets_backfills_with_asana_when_truncated(self):
         """Ticket truncation should still return up to 3 available Asana tickets."""
@@ -289,17 +289,18 @@ class TestFindAsanaTickets:
 
         tickets = await tpc.extract_tickets(provider)
 
-        assert len(tickets) == 3
+        assert len(tickets) == 4
         assert tickets[0]["ticket_url"] == "https://github.com/owner/repo/issues/1"
         assert [
             ticket["ticket_url"] for ticket in tickets[1:]
         ] == [
             "https://app.asana.com/0/99/111111111111",
             "https://app.asana.com/0/99/222222222222",
+            "https://app.asana.com/0/99/333333333333",
         ]
 
-    async def test_asana_slot_does_not_skip_later_github_candidate(self):
-        """A reserved Asana slot must not reduce the existing GitHub attempt budget."""
+    async def test_asana_addition_does_not_skip_later_github_candidate(self):
+        """Adding Asana must not reduce the existing GitHub attempt budget."""
         provider = _GithubProvider(
             "Fixes #1 and #2 and #3. "
             "Related Asana task: https://app.asana.com/0/99/111111111111",
@@ -364,9 +365,13 @@ class TestFindAsanaTickets:
         )
 
     async def test_extract_tickets_adds_asana_without_truncating_azure(self):
-        """Asana context must not impose a new cap on Azure work items."""
+        """Azure work items remain intact while Asana additions keep their own cap."""
         provider = _AzureProvider(
-            "Related Asana task: https://app.asana.com/0/99/888888888888",
+            "Related Asana tasks: "
+            "https://app.asana.com/0/99/111111111111 "
+            "https://app.asana.com/0/99/222222222222 "
+            "https://app.asana.com/0/99/333333333333 "
+            "https://app.asana.com/0/99/444444444444",
             [
                 {
                     "id": 1,
@@ -392,13 +397,26 @@ class TestFindAsanaTickets:
                     "acceptance_criteria": "",
                     "labels": [],
                 },
+                {
+                    "id": 4,
+                    "url": "https://dev.azure.com/org/project/_workitems/edit/4",
+                    "title": "Issue 4",
+                    "body": "Issue 4 body",
+                    "acceptance_criteria": "",
+                    "labels": [],
+                },
             ],
         )
 
         tickets = await tpc.extract_tickets(provider)
 
-        assert len(tickets) == 4
-        assert tickets[-1]["ticket_url"] == "https://app.asana.com/0/99/888888888888"
+        assert len(tickets) == 7
+        assert [ticket["ticket_id"] for ticket in tickets[:4]] == [1, 2, 3, 4]
+        assert [ticket["ticket_url"] for ticket in tickets[-3:]] == [
+            "https://app.asana.com/0/99/111111111111",
+            "https://app.asana.com/0/99/222222222222",
+            "https://app.asana.com/0/99/333333333333",
+        ]
 
     async def test_extract_tickets_preserves_all_azure_work_items_without_asana(self):
         """Azure-only extraction should preserve its pre-Asana behavior."""
@@ -484,6 +502,32 @@ class TestFindAsanaTickets:
 
         assert tickets == []
         assert attempted_urls == ticket_urls[:3]
+
+    async def test_invalid_asana_url_does_not_abort_valid_batch_entry(self, monkeypatch):
+        attempted_urls = []
+
+        async def _recording_fetch(_session, ticket_url, _max_body_characters):
+            attempted_urls.append(ticket_url)
+            task_gid = tpc._get_asana_task_gid(ticket_url)
+            return {
+                "ticket_id": task_gid,
+                "ticket_url": ticket_url,
+                "title": f"Asana task {task_gid}",
+                "body": "",
+                "labels": "",
+            }
+
+        monkeypatch.setattr(tpc, "_fetch_asana_ticket_content", _recording_fetch)
+        valid_url = "https://app.asana.com/0/99/888888888888"
+
+        tickets = await tpc._fetch_asana_ticket_contents(
+            ["https://app.asana.com/not-a-task", valid_url],
+            2,
+            10000,
+        )
+
+        assert [ticket["ticket_id"] for ticket in tickets] == ["888888888888"]
+        assert attempted_urls == [valid_url]
 
     async def test_asana_api_uses_bearer_token(self, monkeypatch):
         captured = {}
