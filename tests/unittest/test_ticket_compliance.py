@@ -42,27 +42,19 @@ class _FirstTwoFailingRepo:
         return _Issue(number)
 
 
-class _GithubProvider(GithubProvider):
-    repo = "owner/repo"
-    base_url_html = "https://github.com"
-    repo_obj = _Repo()
-
-    def __init__(self, description, repo_obj=None):
-        self.description = description
-        if repo_obj is not None:
-            self.repo_obj = repo_obj
-
-    def get_user_description(self):
-        return self.description
-
-    def get_pr_branch(self):
-        return ""
-
-    def _parse_issue_url(self, ticket):
-        return self.repo, int(ticket.rsplit("/", 1)[-1])
-
-    def fetch_sub_issues(self, ticket):
-        return []
+def _make_github_provider(description, repo_obj=None):
+    provider = GithubProvider.__new__(GithubProvider)
+    provider.repo = "owner/repo"
+    provider.base_url_html = "https://github.com"
+    provider.repo_obj = repo_obj if repo_obj is not None else _Repo()
+    provider.get_user_description = lambda: description
+    provider.get_pr_branch = lambda: ""
+    provider._parse_issue_url = lambda ticket: (
+        provider.repo,
+        int(ticket.rsplit("/", 1)[-1]),
+    )
+    provider.fetch_sub_issues = lambda _ticket: []
+    return provider
 
 
 class _GenericProvider:
@@ -81,16 +73,11 @@ class _FailingProvider:
         raise RuntimeError("description unavailable")
 
 
-class _AzureProvider(AzureDevopsProvider):
-    def __init__(self, description, work_items):
-        self.description = description
-        self.work_items = work_items
-
-    def get_user_description(self):
-        return self.description
-
-    def get_linked_work_items(self):
-        return self.work_items
+def _make_azure_provider(description, work_items):
+    provider = AzureDevopsProvider.__new__(AzureDevopsProvider)
+    provider.get_user_description = lambda: description
+    provider.get_linked_work_items = lambda: work_items
+    return provider
 
 
 @pytest.fixture
@@ -224,9 +211,10 @@ class TestFindAsanaTickets:
         tickets = tpc.find_asana_tickets(text)
         assert len(tickets) == 2
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_includes_asana_reference(self):
         """extract_tickets() should include Asana references in ticket content."""
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Related Asana task: https://app.asana.com/0/99/888888888888"
         )
 
@@ -242,9 +230,10 @@ class TestFindAsanaTickets:
             }
         ]
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_adds_asana_without_displacing_github(self):
         """Asana context should not displace GitHub's three existing ticket slots."""
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Fixes #1 and #2 and #3. "
             "Related Asana task: https://app.asana.com/0/99/888888888888"
         )
@@ -258,9 +247,10 @@ class TestFindAsanaTickets:
             "https://app.asana.com/0/99/888888888888",
         ]
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_backfills_with_asana_when_truncated(self):
         """Ticket truncation should still return up to 3 available Asana tickets."""
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Related Asana tasks: "
             "https://app.asana.com/0/99/111111111111 "
             "https://app.asana.com/0/99/222222222222 "
@@ -276,9 +266,10 @@ class TestFindAsanaTickets:
             for ticket in tickets
         )
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_backfills_asana_after_github_fetch_failure(self):
         """Asana tickets should fill available slots after GitHub issue fetch failures."""
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Fixes #1 and #2. "
             "Related Asana tasks: "
             "https://app.asana.com/0/99/111111111111 "
@@ -299,9 +290,10 @@ class TestFindAsanaTickets:
             "https://app.asana.com/0/99/333333333333",
         ]
 
+    @pytest.mark.asyncio
     async def test_asana_addition_does_not_skip_later_github_candidate(self):
         """Adding Asana must not reduce the existing GitHub attempt budget."""
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Fixes #1 and #2 and #3. "
             "Related Asana task: https://app.asana.com/0/99/111111111111",
             repo_obj=_FirstTwoFailingRepo(),
@@ -314,6 +306,7 @@ class TestFindAsanaTickets:
             "https://app.asana.com/0/99/111111111111",
         ]
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_includes_asana_for_non_github_provider(self):
         """Asana detection should not be limited to the GitHub provider path."""
         provider = _GenericProvider(
@@ -332,6 +325,7 @@ class TestFindAsanaTickets:
             }
         ]
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_preserves_unsupported_provider_contract(self):
         """A non-ticket provider without Asana references remains unsupported."""
         provider = _GenericProvider("No related ticket references.")
@@ -340,12 +334,14 @@ class TestFindAsanaTickets:
 
         assert tickets is None
 
+    @pytest.mark.asyncio
     async def test_asana_description_error_is_isolated(self):
         """An optional Asana scan failure should not invent provider support."""
         tickets = await tpc.extract_tickets(_FailingProvider())
 
         assert tickets is None
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_caps_non_github_asana_references(self):
         """Provider-agnostic Asana fallback should keep ticket context bounded."""
         provider = _GenericProvider(
@@ -364,9 +360,10 @@ class TestFindAsanaTickets:
             for ticket in tickets
         )
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_adds_asana_without_truncating_azure(self):
         """Azure work items remain intact while Asana additions keep their own cap."""
-        provider = _AzureProvider(
+        provider = _make_azure_provider(
             "Related Asana tasks: "
             "https://app.asana.com/0/99/111111111111 "
             "https://app.asana.com/0/99/222222222222 "
@@ -418,9 +415,10 @@ class TestFindAsanaTickets:
             "https://app.asana.com/0/99/333333333333",
         ]
 
+    @pytest.mark.asyncio
     async def test_extract_tickets_preserves_all_azure_work_items_without_asana(self):
         """Azure-only extraction should preserve its pre-Asana behavior."""
-        provider = _AzureProvider(
+        provider = _make_azure_provider(
             "",
             [
                 {
@@ -463,6 +461,7 @@ class TestFindAsanaTickets:
         assert len(tickets) == 4
         assert [ticket["ticket_id"] for ticket in tickets] == [1, 2, 3, 4]
 
+    @pytest.mark.asyncio
     async def test_missing_token_does_not_create_placeholder_ticket(self):
         get_settings().set("asana.api_token", "")
         provider = _GenericProvider(
@@ -471,12 +470,13 @@ class TestFindAsanaTickets:
 
         assert await tpc.extract_tickets(provider) == []
 
+    @pytest.mark.asyncio
     async def test_asana_fetch_failure_does_not_displace_github_ticket(self, monkeypatch):
         async def _failing_fetch(*_args, **_kwargs):
             raise RuntimeError("task unavailable")
 
         monkeypatch.setattr(tpc, "_fetch_asana_ticket_content", _failing_fetch)
-        provider = _GithubProvider(
+        provider = _make_github_provider(
             "Fixes #1 and #2 and #3. "
             "Related Asana task: https://app.asana.com/0/99/888888888888"
         )
@@ -485,6 +485,7 @@ class TestFindAsanaTickets:
 
         assert [ticket["ticket_id"] for ticket in tickets] == [1, 2, 3]
 
+    @pytest.mark.asyncio
     async def test_asana_fetch_attempts_are_bounded_when_tasks_fail(self, monkeypatch):
         attempted_urls = []
 
@@ -503,6 +504,7 @@ class TestFindAsanaTickets:
         assert tickets == []
         assert attempted_urls == ticket_urls[:3]
 
+    @pytest.mark.asyncio
     async def test_invalid_asana_url_does_not_abort_valid_batch_entry(self, monkeypatch):
         attempted_urls = []
 
@@ -529,6 +531,7 @@ class TestFindAsanaTickets:
         assert [ticket["ticket_id"] for ticket in tickets] == ["888888888888"]
         assert attempted_urls == [valid_url]
 
+    @pytest.mark.asyncio
     async def test_asana_api_uses_bearer_token(self, monkeypatch):
         captured = {}
 
@@ -602,6 +605,7 @@ class _AsanaSession:
 
 
 class TestFetchAsanaTicketContent:
+    @pytest.mark.asyncio
     async def test_maps_real_task_fields_and_truncates_notes(self):
         response = _AsanaResponse(
             200,
@@ -633,6 +637,7 @@ class TestFetchAsanaTicketContent:
             "labels": "backend, urgent",
         }
 
+    @pytest.mark.asyncio
     async def test_non_success_response_raises_without_placeholder(self):
         session = _AsanaSession(_AsanaResponse(403, {"errors": []}))
 
